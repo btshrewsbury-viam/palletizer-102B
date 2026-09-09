@@ -210,6 +210,16 @@ class Palletizer(Generic, EasyResource):
         if verb == "pack":
             return {"placed": await self.pack()}
 
+        # autopack: place while there is room, swap full trays.
+        if verb == "autopack":
+            max_boxes_to_pack = command.get("max_boxes_to_pack")
+            if max_boxes_to_pack is not None:
+                try:
+                    max_boxes_to_pack = int(max_boxes_to_pack)
+                except (TypeError, ValueError):
+                    return {"error": "max_boxes_to_pack must be a number"}
+            return await self.autopack_dispatch(max_boxes_to_pack)
+
         # Anything unrouted gets an answer and a log line, never a stack trace.
         self.logger.warning(f"unknown command: {verb}")
         return {"error": f"unknown command: {verb}"}
@@ -318,6 +328,42 @@ class Palletizer(Generic, EasyResource):
         # Report the count, the answer a caller reads.
         return len(self.placed)
 
+    async def autopack(self, max_boxes_to_pack=None):
+        """The loop: place while there is room, swap a full tray, stop at
+        max_boxes_to_pack."""
+        boxes_per_pallet = self.columns * self.rows * self.layers
+
+        if max_boxes_to_pack is None:
+            max_boxes_to_pack = boxes_per_pallet
+
+        placed = 0
+        while placed < max_boxes_to_pack:
+            # TODO 1: if there is no room, swap the tray and `continue`.
+            if not await self.pallet_has_room():
+                await self.swap_tray()
+                continue
+
+            # TODO 2: otherwise place one box and count it.
+            await self.place()
+            placed += 1
+
+        result = {"Number Packed": placed, "Max Boxes": max_boxes_to_pack}
+        self.logger.info(f"autopack: {result}")
+        return result
+
+    async def autopack_dispatch(self, max_boxes_to_pack=None):
+        """Guard: a second call during a run answers busy instead of
+        starting a second loop on the same arm."""
+        # Refuse a second run while one is already going.
+        if getattr(self, "_packing", False):
+            return {"busy": True}
+
+        # Set the flag, run the loop, and clear the flag no matter what.
+        self._packing = True
+        try:
+            return await self.autopack(max_boxes_to_pack)
+        finally:
+            self._packing = False
     # --------------------------------------------------------------- motion
 
     async def move_gripper(self, pose, obstacles=None):
